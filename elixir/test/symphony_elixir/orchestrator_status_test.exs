@@ -21,6 +21,42 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "human-gated workspace is not dispatchable after orchestrator restart" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-orchestrator-human-gate-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "95", identifier: "GH-95", title: "Human gate", state: "Todo"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      ledger = Path.join([workspace, ".start-issue", "runs"])
+      File.mkdir_p!(ledger)
+      File.write!(Path.join(ledger, "issue-GH-95.json"), Jason.encode!(%{"run_status" => "HUMAN_GATE"}))
+
+      state = %Orchestrator.State{max_concurrent_agents: 1}
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      running_entry = %{
+        identifier: issue.identifier,
+        issue: issue,
+        workspace_path: workspace,
+        session_id: "session-95"
+      }
+
+      state = Map.put(state, :claimed, MapSet.new([issue.id]))
+      state = Orchestrator.handle_agent_down_for_test(:normal, state, issue.id, running_entry, "session-95")
+
+      assert Map.has_key?(state.blocked, issue.id)
+      assert state.retry_attempts == %{}
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
