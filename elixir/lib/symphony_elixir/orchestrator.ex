@@ -223,6 +223,23 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp handle_agent_down(
+         {{:workspace_hook_failed, _hook_name, _status, output}, _stacktrace} = reason,
+         state,
+         issue_id,
+         running_entry,
+         session_id
+       ) do
+    error = "workspace bootstrap failed: #{output}"
+
+    Logger.warning(
+      "Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} " <>
+        "session_id=#{session_id}: #{error} reason=#{inspect(reason)}"
+    )
+
+    block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
