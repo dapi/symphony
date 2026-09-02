@@ -40,6 +40,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "after_create may resume a verified existing workspace" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-workspace-resume-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    existing_workspace = Path.join(test_root, "existing")
+
+    try do
+      File.mkdir_p!(existing_workspace)
+      File.write!(Path.join(existing_workspace, "progress.txt"), "preserve me\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "printf '__SYMPHONY_REUSE_WORKSPACE__\\t%s\\n' '#{existing_workspace}'"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-RESUME")
+      assert workspace == existing_workspace
+      assert File.read!(Path.join(workspace, "progress.txt")) == "preserve me\n"
+      refute File.exists?(Path.join(workspace_root, "MT-RESUME"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(

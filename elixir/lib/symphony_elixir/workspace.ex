@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @reuse_workspace_marker "__SYMPHONY_REUSE_WORKSPACE__"
 
   @type worker_host :: String.t() | nil
 
@@ -24,6 +25,10 @@ defmodule SymphonyElixir.Workspace do
         case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
           :ok ->
             {:ok, workspace}
+
+          {:reuse, existing_workspace} ->
+            cleanup_failed_new_workspace(workspace, created?, worker_host)
+            {:ok, existing_workspace}
 
           {:error, _reason} = error ->
             cleanup_failed_new_workspace(workspace, created?, worker_host)
@@ -434,7 +439,14 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp handle_hook_command_result({_output, 0}, _workspace, _issue_id, _hook_name) do
+  defp handle_hook_command_result({output, 0}, workspace, _issue_context, "after_create") do
+    case reuse_workspace_from_output(output, workspace) do
+      nil -> :ok
+      existing_workspace -> {:reuse, existing_workspace}
+    end
+  end
+
+  defp handle_hook_command_result({_output, 0}, _workspace, _issue_context, _hook_name) do
     :ok
   end
 
@@ -457,6 +469,35 @@ defmodule SymphonyElixir.Workspace do
         binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
     end
   end
+
+  # A trusted after_create hook may ask Symphony to resume a pre-existing
+  # workspace instead of the just-created placeholder. This is deliberately a
+  # hook-level decision: only the repository workflow knows how an issue maps
+  # to its branch and can assess its own worktree ownership policy.
+  defp reuse_workspace_from_output(output, created_workspace) do
+    output
+    |> IO.iodata_to_binary()
+    |> String.split(["\n", "\r\n"], trim: true)
+    |> Enum.find_value(fn line ->
+      case String.split(line, "\t", parts: 2) do
+        [@reuse_workspace_marker, candidate] ->
+          candidate = String.trim(candidate)
+
+          if reusable_workspace?(candidate, created_workspace), do: candidate, else: nil
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp reusable_workspace?(candidate, created_workspace)
+       when is_binary(candidate) and is_binary(created_workspace) do
+    candidate != "" and Path.type(candidate) == :absolute and
+      Path.expand(candidate) != Path.expand(created_workspace) and File.dir?(candidate)
+  end
+
+  defp reusable_workspace?(_candidate, _created_workspace), do: false
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do
     validate_local_workspace_path(workspace, Config.local_workspace_root())

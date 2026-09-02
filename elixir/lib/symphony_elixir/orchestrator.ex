@@ -772,6 +772,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
+    publish_human_gate(running_entry, error)
+
     blocked_entry = %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
@@ -794,6 +796,29 @@ defmodule SymphonyElixir.Orchestrator do
         blocked: Map.put(state.blocked, issue_id, blocked_entry)
     }
   end
+
+  defp publish_human_gate(%{issue: %Issue{} = issue, identifier: identifier}, error) do
+    body = """
+    ## Human Gate
+
+    **Нужно решение:** подтвердить, можно ли продолжить работу в существующем worktree для `#{identifier}`, либо освободить/удалить его.
+
+    **Контекст и риск:** Symphony не смог безопасно подготовить изолированный workspace: #{error}
+
+    **Варианты:** 1) подтвердить, что существующий worktree не используется и его можно продолжить; 2) освободить worktree; 3) дать иной безопасный путь.
+
+    **Что нужно в ответе:** точное разрешение на продолжение либо описание требуемого действия с worktree.
+
+    <sub><em>Чтобы продолжить: ответьте на этот комментарий, затем удалите label <code>human-gate</code> и добавьте <code>codex-ready</code>. Symphony проверит ответ и автоматически возобновит работу.</em></sub>
+    """
+
+    case Tracker.open_human_gate(issue, body, Config.settings!().tracker.required_labels) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Could not publish Human Gate for issue_identifier=#{identifier}: #{inspect(reason)}")
+    end
+  end
+
+  defp publish_human_gate(_running_entry, _error), do: :ok
 
   defp choose_issues(issues, state) do
     active_states = active_state_set()

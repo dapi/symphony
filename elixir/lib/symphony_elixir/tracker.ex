@@ -25,10 +25,12 @@ defmodule SymphonyElixir.Tracker do
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
   @callback validate_config(map()) :: :ok | {:error, term()}
+  @callback open_human_gate(Issue.t(), String.t(), [String.t()]) :: :ok | {:error, term()}
 
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
-                      validate_config: 1
+                      validate_config: 1,
+                      open_human_gate: 3
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(states) do
@@ -38,6 +40,18 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) do
     adapter().fetch_issues_by_ids(issue_ids)
+  end
+
+  @spec open_human_gate(Issue.t(), String.t(), [String.t()]) :: :ok | {:error, term()}
+  def open_human_gate(%Issue{} = issue, body, required_labels)
+      when is_binary(body) and is_list(required_labels) do
+    selected_adapter = adapter()
+
+    if Code.ensure_loaded?(selected_adapter) and function_exported?(selected_adapter, :open_human_gate, 3) do
+      selected_adapter.open_human_gate(issue, body, required_labels)
+    else
+      {:error, :tracker_does_not_support_human_gate_publication}
+    end
   end
 
   @doc """
