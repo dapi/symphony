@@ -4,6 +4,7 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
   alias SymphonyElixir.GitHub.Adapter, as: GitHubAdapter
   alias SymphonyElixir.GitHub.AgentTool, as: GitHubAgentTool
   alias SymphonyElixir.GitHub.Client, as: GitHubClient
+  alias SymphonyElixir.Tracker.Issue
 
   defmodule FakeGitHubClient do
     def fetch_issues_by_states(states) do
@@ -14,6 +15,19 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     def fetch_issues_by_ids(ids) do
       send(self(), {:github_ids_called, ids})
       {:ok, ids}
+    end
+
+    def request(method, path, params, body, opts) do
+      send(self(), {:github_request, method, path, params, body, opts})
+
+      case Process.get(:fake_github_responses, []) do
+        [response | rest] ->
+          Process.put(:fake_github_responses, rest)
+          response
+
+        [] ->
+          {:error, :unexpected_request}
+      end
     end
   end
 
@@ -94,6 +108,61 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              GitHubClient.validate_settings(tracker_settings(%{"api_url" => "http://api.github.com"}))
 
     assert GitHubClient.secret_environment_names(tracker_settings(%{"token" => "$SYMPHONY_GITHUB_TOKEN"})) == ["GITHUB_TOKEN", "SYMPHONY_GITHUB_TOKEN"]
+  end
+
+  test "adapter opens a GitHub human gate and removes dispatch labels" do
+    write_github_workflow!(Workflow.workflow_file_path(), "test-token")
+    Application.put_env(:symphony_elixir, :github_client_module, FakeGitHubClient)
+
+    Process.put(:fake_github_responses, [
+      {:ok, %{status: 201}},
+      {:ok, %{status: 200}},
+      {:ok, %{status: 204}},
+      {:ok, %{status: 404}}
+    ])
+
+    issue = %Issue{native_ref: %{"repo" => "octo/repo", "number" => 42}}
+
+    assert :ok = GitHubAdapter.open_human_gate(issue, "Need a decision", ["codex-ready", "needs review"])
+
+    assert_receive {:github_request, "POST", "/repos/octo/repo/issues/42/comments", %{}, %{"body" => "Need a decision"}, _}
+    assert_receive {:github_request, "POST", "/repos/octo/repo/issues/42/labels", %{}, %{"labels" => ["human-gate"]}, _}
+    assert_receive {:github_request, "DELETE", "/repos/octo/repo/issues/42/labels/codex-ready", %{}, nil, _}
+    assert_receive {:github_request, "DELETE", "/repos/octo/repo/issues/42/labels/needs%20review", %{}, nil, _}
+
+    Process.put(:fake_github_responses, [{:ok, %{status: 201}}, {:ok, %{status: 200}}])
+    assert :ok = GitHubAdapter.open_human_gate(issue, "Need a decision", [])
+    assert_receive {:github_request, "POST", "/repos/octo/repo/issues/42/comments", %{}, %{"body" => "Need a decision"}, _}
+
+    Process.put(:fake_github_responses, [{:ok, %{status: 201}}, {:ok, %{status: 200}}])
+    assert :ok = Tracker.open_human_gate(issue, "Need a decision", [])
+  end
+
+  test "adapter reports GitHub human gate failures and invalid references" do
+    write_github_workflow!(Workflow.workflow_file_path(), "test-token")
+    Application.put_env(:symphony_elixir, :github_client_module, FakeGitHubClient)
+    issue = %Issue{native_ref: %{"repo" => "octo/repo", "number" => 42}}
+
+    Process.put(:fake_github_responses, [{:ok, %{status: 500}}])
+    assert {:error, {:github_api_status, 500}} = GitHubAdapter.open_human_gate(issue, "Need a decision", [])
+
+    Process.put(:fake_github_responses, [{:error, :timeout}])
+    assert {:error, :timeout} = GitHubAdapter.open_human_gate(issue, "Need a decision", [])
+
+    Process.put(:fake_github_responses, [:unexpected_response])
+    assert {:error, :unexpected_response} = GitHubAdapter.open_human_gate(issue, "Need a decision", [])
+
+    Process.put(:fake_github_responses, [{:ok, %{status: 201}}, {:ok, %{status: 200}}])
+    assert :ok = GitHubAdapter.open_human_gate(issue, "Need a decision", [42])
+
+    Process.put(:fake_github_responses, [{:ok, %{status: 201}}, {:ok, %{status: 200}}, {:ok, %{status: 500}}])
+    assert {:error, {:github_api_status, 500}} = GitHubAdapter.open_human_gate(issue, "Need a decision", ["codex-ready"])
+
+    Process.put(:fake_github_responses, [{:ok, %{status: 201}}, {:ok, %{status: 200}}, {:error, :timeout}])
+    assert {:error, :timeout} = GitHubAdapter.open_human_gate(issue, "Need a decision", ["codex-ready"])
+
+    assert {:error, :invalid_github_issue_reference} =
+             GitHubAdapter.open_human_gate(%Issue{}, "Need a decision", [])
   end
 
   test "client normalizes GitHub issues without dropping provider details" do

@@ -5,8 +5,8 @@ defmodule SymphonyElixir.GitHub.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.GitHub.{AgentTool, Client}
   alias SymphonyElixir.Config
+  alias SymphonyElixir.GitHub.{AgentTool, Client}
   alias SymphonyElixir.Tracker.Issue
 
   @active_states ["open"]
@@ -49,9 +49,9 @@ defmodule SymphonyElixir.GitHub.Adapter do
     issue_path = "/repos/#{repo}/issues/#{number}"
 
     with {:ok, %{status: status}} when status in 200..299 <-
-           Client.request("POST", issue_path <> "/comments", %{}, %{"body" => body}, tracker_settings: settings),
+           client_module().request("POST", issue_path <> "/comments", %{}, %{"body" => body}, tracker_settings: settings),
          {:ok, %{status: label_status}} when label_status in 200..299 <-
-           Client.request("POST", issue_path <> "/labels", %{}, %{"labels" => ["human-gate"]}, tracker_settings: settings),
+           client_module().request("POST", issue_path <> "/labels", %{}, %{"labels" => ["human-gate"]}, tracker_settings: settings),
          :ok <- remove_required_labels(issue_path, required_labels, settings) do
       :ok
     else
@@ -75,7 +75,7 @@ defmodule SymphonyElixir.GitHub.Adapter do
   defp remove_required_labels(issue_path, [label | rest], settings) when is_binary(label) do
     path = issue_path <> "/labels/" <> URI.encode(label, &URI.char_unreserved?/1)
 
-    case Client.request("DELETE", path, %{}, nil, tracker_settings: settings) do
+    case client_module().request("DELETE", path, %{}, nil, tracker_settings: settings) do
       {:ok, %{status: status}} when status in 200..299 or status == 404 ->
         remove_required_labels(issue_path, rest, settings)
 
