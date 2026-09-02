@@ -237,6 +237,7 @@ defmodule SymphonyElixir.Orchestrator do
         "session_id=#{session_id}: #{error} reason=#{inspect(reason)}"
     )
 
+    publish_human_gate(running_entry, error)
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
@@ -772,8 +773,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
-    publish_human_gate(running_entry, error)
-
     blocked_entry = %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
