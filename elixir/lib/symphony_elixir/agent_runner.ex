@@ -29,6 +29,10 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
+      {:error, {:workspace_hook_failed, _hook_name, _status, _output} = reason} ->
+        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+        exit({:workspace_hook_failed, reason})
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"

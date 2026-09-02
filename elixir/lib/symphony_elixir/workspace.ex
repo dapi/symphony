@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @reuse_workspace_marker "__SYMPHONY_REUSE_WORKSPACE__"
 
   @type worker_host :: String.t() | nil
 
@@ -24,6 +25,10 @@ defmodule SymphonyElixir.Workspace do
         case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
           :ok ->
             {:ok, workspace}
+
+          {:reuse, existing_workspace} ->
+            cleanup_failed_new_workspace(workspace, created?, worker_host)
+            {:ok, existing_workspace}
 
           {:error, _reason} = error ->
             cleanup_failed_new_workspace(workspace, created?, worker_host)
@@ -378,7 +383,8 @@ defmodule SymphonyElixir.Workspace do
               {output, status},
               workspace,
               %{issue_id: nil, issue_identifier: Path.basename(workspace)},
-              "before_remove"
+              "before_remove",
+              worker_host
             )
 
           {:error, {:workspace_hook_timeout, "before_remove", _timeout_ms} = reason} ->
@@ -406,7 +412,7 @@ defmodule SymphonyElixir.Workspace do
 
     case Task.yield(task, timeout_ms) do
       {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
+        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name, nil)
 
       nil ->
         Task.shutdown(task, :brutal_kill)
@@ -424,7 +430,7 @@ defmodule SymphonyElixir.Workspace do
 
     case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do
       {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
+        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name, worker_host)
 
       {:error, {:workspace_hook_timeout, ^hook_name, _timeout_ms} = reason} ->
         {:error, reason}
@@ -434,11 +440,18 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp handle_hook_command_result({_output, 0}, _workspace, _issue_id, _hook_name) do
+  defp handle_hook_command_result({output, 0}, workspace, _issue_context, "after_create", worker_host) do
+    case reuse_workspace_from_output(output, workspace, worker_host) do
+      nil -> :ok
+      existing_workspace -> {:reuse, existing_workspace}
+    end
+  end
+
+  defp handle_hook_command_result({_output, 0}, _workspace, _issue_context, _hook_name, _worker_host) do
     :ok
   end
 
-  defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do
+  defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name, _worker_host) do
     sanitized_output = sanitize_hook_output_for_log(output)
 
     Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
@@ -456,6 +469,82 @@ defmodule SymphonyElixir.Workspace do
       false ->
         binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
     end
+  end
+
+  # A trusted after_create hook may ask Symphony to resume a pre-existing
+  # workspace instead of the just-created placeholder. The returned path still
+  # has to satisfy the same workspace-root boundary as every agent cwd.
+  defp reuse_workspace_from_output(output, created_workspace, worker_host) do
+    output
+    |> IO.iodata_to_binary()
+    |> String.split(["\n", "\r\n"], trim: true)
+    |> Enum.find_value(fn line ->
+      case String.split(line, "\t", parts: 2) do
+        [@reuse_workspace_marker, candidate] ->
+          candidate = String.trim(candidate)
+
+          reusable_workspace_path(candidate, created_workspace, worker_host)
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp reusable_workspace_path(candidate, created_workspace, nil)
+       when is_binary(candidate) and is_binary(created_workspace) do
+    with true <- candidate != "" and Path.type(candidate) == :absolute,
+         true <- File.dir?(candidate),
+         :ok <- validate_workspace_path(candidate, nil),
+         {:ok, canonical_candidate} <- PathSafety.canonicalize(candidate),
+         true <- canonical_candidate != Path.expand(created_workspace) do
+      candidate
+    else
+      _ -> nil
+    end
+  end
+
+  defp reusable_workspace_path(candidate, created_workspace, worker_host)
+       when is_binary(candidate) and is_binary(created_workspace) and is_binary(worker_host) do
+    timeout_ms = Config.settings!().hooks.timeout_ms
+
+    with true <- candidate != "" and Path.type(candidate) == :absolute,
+         {:ok, {output, 0}} <-
+           run_remote_command(worker_host, reusable_workspace_script(candidate, created_workspace), timeout_ms) do
+      parse_reusable_remote_workspace_output(output)
+    else
+      _ -> nil
+    end
+  end
+
+  defp reusable_workspace_path(_candidate, _created_workspace, _worker_host), do: nil
+
+  defp reusable_workspace_script(candidate, created_workspace) do
+    [
+      "set -eu",
+      remote_shell_assign("candidate", candidate),
+      remote_shell_assign("created_workspace", created_workspace),
+      remote_shell_assign("workspace_root", Config.settings!().workspace.root),
+      "test -d \"$candidate\"",
+      "candidate=$(cd \"$candidate\" && pwd -P)",
+      "created_workspace=$(cd \"$created_workspace\" && pwd -P)",
+      "workspace_root=$(cd \"$workspace_root\" && pwd -P)",
+      "test \"$candidate\" != \"$created_workspace\"",
+      "case \"$candidate/\" in \"$workspace_root\"/*) printf '%s\\t%s\\n' '#{@reuse_workspace_marker}' \"$candidate\" ;; *) exit 1 ;; esac"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp parse_reusable_remote_workspace_output(output) do
+    output
+    |> IO.iodata_to_binary()
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn line ->
+      case String.split(line, "\t", parts: 2) do
+        [@reuse_workspace_marker, workspace] when workspace != "" -> workspace
+        _ -> nil
+      end
+    end)
   end
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do

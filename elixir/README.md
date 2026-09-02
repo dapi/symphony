@@ -169,6 +169,9 @@ Notes:
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
+- An `after_create` hook may resume an existing workspace by emitting
+  `__SYMPHONY_REUSE_WORKSPACE__\t<absolute-path>`. The path must exist and remain under
+  `workspace.root`; on SSH workers this check is performed on that worker.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - For the Linear adapter, `tracker.provider.api_key` reads from `LINEAR_API_KEY` when unset or
