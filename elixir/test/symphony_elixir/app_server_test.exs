@@ -76,6 +76,71 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server gives Codex a writable temporary directory inside its workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-tempdir-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-TEMPDIR")
+      codex_binary = Path.join(test_root, "fake-codex")
+      tempdir_trace = Path.join(test_root, "tempdir.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      printf '%s\\n' "$TMPDIR" > "${SYMP_TEST_TMPDIR_TRACE}"
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-tempdir"}}}' ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-tempdir"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_TMPDIR_TRACE", tempdir_trace)
+      on_exit(fn -> System.delete_env("SYMP_TEST_TMPDIR_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-tempdir",
+        identifier: "MT-TEMPDIR",
+        title: "Use a workspace temporary directory",
+        description: "Validate the runtime temporary directory",
+        state: "In Progress",
+        url: "https://example.org/issues/tempdir",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "check tempdir", issue)
+
+      assert {:ok, canonical_tempdir} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(workspace, ".symphony-tmp"))
+
+      assert File.read!(tempdir_trace) == canonical_tempdir <> "\n"
+      assert File.dir?(Path.join(workspace, ".symphony-tmp"))
+    after
+      System.delete_env("SYMP_TEST_TMPDIR_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "turn timeout resets on stream updates and fires after silence" do
     test_root =
       Path.join(

@@ -277,8 +277,73 @@ defmodule SymphonyElixir.Workspace do
 
   def workspace_key(_identifier), do: "issue"
 
+  @doc false
+  @spec human_gate?(map() | String.t() | nil) :: boolean()
+  def human_gate?(issue_or_identifier) do
+    with {:ok, workspace} <- workspace_path_for_issue(workspace_key(issue_or_identifier), nil),
+         {:ok, "HUMAN_GATE"} <- run_status(workspace, issue_or_identifier) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  @doc false
+  @spec human_gate?(Path.t(), map() | String.t() | nil) :: boolean()
+  def human_gate?(workspace, issue_or_identifier) when is_binary(workspace) do
+    case run_status(workspace, issue_or_identifier) do
+      {:ok, "HUMAN_GATE"} -> true
+      _ -> false
+    end
+  end
+
+  @doc false
+  @spec run_status(Path.t(), map() | String.t() | nil) :: {:ok, String.t()} | {:error, term()}
+  def run_status(workspace, issue_or_identifier) when is_binary(workspace) do
+    issue_or_identifier
+    |> run_ledger_filenames()
+    |> Enum.map(&Path.join([workspace, ".start-issue", "runs", &1]))
+    |> read_run_status()
+  end
+
   defp safe_identifier(identifier) when is_binary(identifier),
     do: String.replace(identifier, ~r/[^a-zA-Z0-9._-]/, "_")
+
+  defp run_ledger_filenames(%{identifier: identifier, id: id}) do
+    [identifier, id]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&"issue-#{workspace_key(&1)}.json")
+    |> Enum.uniq()
+  end
+
+  defp run_ledger_filenames(identifier) when is_binary(identifier),
+    do: ["issue-#{workspace_key(identifier)}.json"]
+
+  defp run_ledger_filenames(_identifier), do: []
+
+  defp read_run_status([]), do: {:error, :run_ledger_not_found}
+
+  defp read_run_status([path | rest]) do
+    case File.read(path) do
+      {:ok, contents} ->
+        case Jason.decode(contents) do
+          {:ok, %{"run_status" => status}} when is_binary(status) ->
+            {:ok, String.upcase(String.trim(status))}
+
+          {:ok, _ledger} ->
+            {:error, :run_status_missing}
+
+          {:error, reason} ->
+            {:error, {:invalid_run_ledger, path, reason}}
+        end
+
+      {:error, :enoent} ->
+        read_run_status(rest)
+
+      {:error, reason} ->
+        {:error, {:run_ledger_unreadable, path, reason}}
+    end
+  end
 
   defp short_identifier_hash(identifier) do
     :crypto.hash(:sha256, identifier)

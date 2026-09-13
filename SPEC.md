@@ -655,7 +655,12 @@ claim state.
 4. `RetryQueued`
    - Worker is not running, but a retry timer exists in `retry_attempts`.
 
-5. `Released`
+5. `Blocked`
+   - Worker recorded `run_status: HUMAN_GATE` in the preserved run ledger.
+   - No retry timer is scheduled; the issue remains claimed until an explicit resume action makes
+     it routable again.
+
+6. `Released`
    - Claim removed because issue is terminal, non-active, missing, or retry path completed without
      re-dispatch.
 
@@ -702,13 +707,15 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `Worker Exit (normal)`
   - Remove running entry.
   - Update aggregate runtime totals.
-  - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+  - Read the preserved run ledger. If `run_status` is `HUMAN_GATE`, move the issue to `Blocked`
+    without scheduling a retry. Otherwise schedule continuation retry (attempt `1`) after the
+    worker exhausts or finishes its in-process turn loop.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
   - Update aggregate runtime totals.
-  - Schedule exponential-backoff retry.
+  - If the preserved run ledger says `HUMAN_GATE`, move the issue to `Blocked`; otherwise schedule
+    exponential-backoff retry.
 
 - `Codex Update Event`
   - Update live session fields, token counters, and rate limits.
@@ -806,6 +813,7 @@ Retry handling behavior:
 2. If not found, release claim.
 3. If found in a terminal state, clean its workspace and release claim.
 4. If found and still active and routable:
+   - Do not dispatch if the preserved local workspace ledger says `run_status: HUMAN_GATE`.
    - Dispatch if slots are available.
    - Otherwise requeue with error `no available orchestrator slots`.
 5. If found but no longer active or routable, release claim without dispatch.
@@ -1169,7 +1177,8 @@ Behavior:
 2. Build prompt from workflow template.
 3. Start app-server session.
 4. Forward app-server events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+5. On any error, fail the worker attempt (the orchestrator will retry), unless the preserved run
+   ledger records `run_status: HUMAN_GATE`.
 
 Note:
 
@@ -1998,7 +2007,9 @@ on_worker_exit(issue_id, reason, state):
   running_entry = state.running.remove(issue_id)
   state = add_runtime_seconds_to_totals(state, running_entry)
 
-  if reason == normal:
+  if run_ledger_status(running_entry) == HUMAN_GATE:
+    state = block_issue(state, issue_id, running_entry, "agent reached HUMAN_GATE")
+  else if reason == normal:
     state.completed.add(issue_id)  # bookkeeping only
     state = schedule_retry(state, issue_id, 1, {
       identifier: running_entry.identifier,

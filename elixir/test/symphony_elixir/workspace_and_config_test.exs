@@ -57,6 +57,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert String.starts_with?(Path.basename(first_workspace), "MT_Det--")
   end
 
+  test "human gate is read from canonical or legacy run ledger" do
+    workspace_root =
+      Path.join(System.tmp_dir!(), "symphony-human-gate-#{System.unique_integer([:positive])}")
+
+    issue = %Issue{id: "95", identifier: "GH-95"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      ledger = Path.join([workspace, ".start-issue", "runs"])
+      File.mkdir_p!(ledger)
+
+      File.write!(Path.join(ledger, "issue-95.json"), Jason.encode!(%{"run_status" => "human_gate"}))
+      assert Workspace.human_gate?(issue)
+
+      File.rm!(Path.join(ledger, "issue-95.json"))
+      File.write!(Path.join(ledger, "issue-GH-95.json"), Jason.encode!(%{"run_status" => "DONE"}))
+      refute Workspace.human_gate?(issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "relative local workspace roots resolve from the workflow directory" do
     workflow_dir = Path.dirname(Workflow.workflow_file_path())
     launcher_dir = Path.join(System.tmp_dir!(), "symphony-elixir-launcher-#{System.unique_integer([:positive])}")

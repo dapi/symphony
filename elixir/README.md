@@ -31,9 +31,9 @@ If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or 
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
 If Codex reports that operator input, approval, or MCP elicitation is required, Symphony keeps the
-issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
-entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
-tracker issue can become a dispatch candidate again after restart.
+issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. A worker that
+records `run_status: HUMAN_GATE` in its preserved run ledger is also blocked without a retry, and is
+not dispatched after restart until its routing label is removed and restored as an explicit resume.
 
 ## How to use it
 
