@@ -41,7 +41,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     dynamic_tool_binding = DynamicTool.bind()
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding) do
+         {:ok, tempdir} <- prepare_tempdir(expanded_workspace, worker_host),
+         {:ok, port} <- start_port(expanded_workspace, tempdir, worker_host, dynamic_tool_binding) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -195,7 +196,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, dynamic_tool_binding) do
+  defp start_port(workspace, tempdir, nil, dynamic_tool_binding) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -210,7 +211,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :stderr_to_stdout,
             args: [~c"-lc", String.to_charlist(local_launch_command(dynamic_tool_binding))],
             cd: String.to_charlist(workspace),
-            env: tracker_secret_port_env(dynamic_tool_binding),
+            env: port_env(tempdir, dynamic_tool_binding),
             line: @port_line_bytes
           ]
         )
@@ -219,9 +220,29 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, dynamic_tool_binding)
+  defp start_port(workspace, tempdir, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, tempdir, dynamic_tool_binding)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
+  end
+
+  defp prepare_tempdir(workspace, nil) do
+    tempdir = Path.join(workspace, ".symphony-tmp")
+
+    case File.mkdir_p(tempdir) do
+      :ok -> {:ok, tempdir}
+      {:error, reason} -> {:error, {:tempdir_prepare_failed, tempdir, reason}}
+    end
+  end
+
+  defp prepare_tempdir(workspace, worker_host) when is_binary(worker_host) do
+    tempdir = Path.join(workspace, ".symphony-tmp")
+    command = "mkdir -p #{shell_escape(tempdir)}"
+
+    case SSH.run(worker_host, command) do
+      {:ok, {_output, 0}} -> {:ok, tempdir}
+      {:ok, {output, status}} -> {:error, {:tempdir_prepare_failed, worker_host, tempdir, status, output}}
+      {:error, reason} -> {:error, {:tempdir_prepare_failed, worker_host, tempdir, reason}}
+    end
   end
 
   defp local_launch_command(dynamic_tool_binding) do
@@ -233,14 +254,19 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> Enum.join(" && ")
   end
 
-  defp remote_launch_command(workspace, dynamic_tool_binding) when is_binary(workspace) do
+  defp remote_launch_command(workspace, tempdir, dynamic_tool_binding) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
+      "export TMPDIR=#{shell_escape(tempdir)}",
       tracker_secret_unset_command(dynamic_tool_binding),
       "exec #{Config.settings!().codex.command}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" && ")
+  end
+
+  defp port_env(tempdir, dynamic_tool_binding) do
+    [{~c"TMPDIR", String.to_charlist(tempdir)} | tracker_secret_port_env(dynamic_tool_binding)]
   end
 
   defp tracker_secret_port_env(dynamic_tool_binding) do
